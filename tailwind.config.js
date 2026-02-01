@@ -21,6 +21,7 @@ export default {
         display: ['Playfair Display', 'serif'],
         sans: ['Poppins', 'ui-sans-serif', 'system-ui']
       }
+      
     },
   },
   plugins: [],
