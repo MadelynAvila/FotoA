@@ -1,0 +1,1216 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { supabase } from '../lib/supabaseClient'
+import DEFAULT_PAYMENT_STATES, { getPaymentStateClasses } from '../lib/paymentStates'
+import AdminHelpCard from '../components/AdminHelpCard'
+import AdminDataTable from '../components/AdminDataTable'
+import AdminDatePicker from '../components/AdminDatePicker'
+import useFocusTrap from '../lib/useFocusTrap'
+
+const estadoColorStyles = {
+  pendiente: { bg: '#FFF8E1', text: '#8A6D3B' },
+  reservada: { bg: '#E4DDCC', text: '#5B4636' },
+  'en progreso': { bg: '#DDE8E8', text: '#2F4F4F' },
+  'en edicion': { bg: '#E5D8F0', text: '#4C2B68' },
+  impresion: { bg: '#F5EDE3', text: '#5B4636' },
+  lista: { bg: '#F2E8DA', text: '#5B4636' },
+  entregada: { bg: '#E6F4EA', text: '#2F6B3F' }
+}
+
+const defaultFilters = {
+  search: '',
+  estado: 'all',
+  fotografo: 'all',
+  fecha: null
+}
+
+const MASIVE_ESTADOS = [
+  'Pendiente',
+  'Reservada',
+  'En progreso',
+  'En edición',
+  'Impresión',
+  'Lista',
+  'Entregada'
+]
+
+function normalize(value) {
+  if (!value) return ''
+  return value
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[^a-z0-9\s]/g, '')
+}
+
+function formatDate(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('es-GT', { dateStyle: 'medium' }).format(date)
+}
+
+function formatTime(value) {
+  if (!value) return '—'
+  const [hours = '', minutes = ''] = String(value).split(':')
+  const h = hours.padStart(2, '0')
+  const m = minutes.padStart(2, '0')
+  return `${h}:${m}`
+}
+
+function formatTimeRange(inicio, fin) {
+  if (!inicio && !fin) return '—'
+  if (inicio && !fin) return formatTime(inicio)
+  if (!inicio && fin) return formatTime(fin)
+  return `${formatTime(inicio)} – ${formatTime(fin)}`
+}
+
+function getEstadoStyles(nombre) {
+  const key = normalize(nombre)
+  return estadoColorStyles[key] || { bg: '#EEE0D1', text: '#5B4636' }
+}
+
+function toDate(value) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return date
+}
+
+function isSameDay(dateValue, targetDate) {
+  if (!dateValue || !targetDate) return false
+  const dateA = toDate(dateValue)
+  const dateB = toDate(targetDate)
+  if (!dateA || !dateB) return false
+  return dateA.toISOString().slice(0, 10) === dateB.toISOString().slice(0, 10)
+}
+
+export default function AdminReservations() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [reservas, setReservas] = useState([])
+  const [estados, setEstados] = useState([])
+  const [filters, setFilters] = useState(() => ({ ...defaultFilters }))
+  const [selection, setSelection] = useState({})
+  const [selectedReservas, setSelectedReservas] = useState([])
+  const [visibleReservas, setVisibleReservas] = useState([])
+  const [bulkActionOpen, setBulkActionOpen] = useState(false)
+  const [bulkEstadoNombre, setBulkEstadoNombre] = useState('')
+  const [bulkLoading, setBulkLoading] = useState(false)
+  const [toast, setToast] = useState(null)
+  const [feedback, setFeedback] = useState({ type: '', message: '' })
+  const [loading, setLoading] = useState(true)
+  const [updatingId, setUpdatingId] = useState(null)
+  const [editingReserva, setEditingReserva] = useState(null)
+  const [editForm, setEditForm] = useState({ fecha: '', hora: '', idfotografo: '', estado: '' })
+  const [savingEdit, setSavingEdit] = useState(false)
+  const bulkModalRef = useRef(null)
+  const editModalRef = useRef(null)
+
+  const safeReservas = useMemo(() => (Array.isArray(reservas) ? reservas : []), [reservas])
+  const safeEstados = useMemo(() => (Array.isArray(estados) ? estados : []), [estados])
+  const safeVisibleReservas = useMemo(
+    () => (Array.isArray(visibleReservas) ? visibleReservas : []),
+    [visibleReservas]
+  )
+  const currentFechaFilter = filters?.fecha ?? null
+
+  const paymentStateIds = useMemo(
+    () => ({
+      pendiente: getPaymentStateClasses(1, DEFAULT_PAYMENT_STATES).id ?? 1,
+      anticipo: getPaymentStateClasses(2, DEFAULT_PAYMENT_STATES).id ?? 2,
+      pagado: getPaymentStateClasses(3, DEFAULT_PAYMENT_STATES).id ?? 3
+    }),
+    []
+  )
+
+  const anticipoInfo = useMemo(
+    () => getPaymentStateClasses(paymentStateIds.anticipo, DEFAULT_PAYMENT_STATES),
+    [paymentStateIds]
+  )
+
+  const reservadaEstadoId = useMemo(() => {
+    const estado = safeEstados.find(item => normalize(item?.nombre_estado) === 'reservada')
+    return estado?.id ?? null
+  }, [safeEstados])
+
+  const loadReservas = useCallback(async () => {
+    setLoading(true)
+    setFeedback({ type: '', message: '' })
+
+    try {
+      const [actividadesRes, estadosRes] = await Promise.all([
+        supabase
+          .from('actividad')
+          .select(
+            'id, idusuario, idagenda, idpaquete, idestado_actividad, idestado_pago, estado_pago:estado_pago ( id, nombre_estado )'
+          )
+          .order('id', { ascending: false }),
+        supabase
+          .from('estado_actividad')
+          .select('id, nombre_estado, orden')
+          .order('orden', { ascending: true })
+      ])
+
+      const errors = [actividadesRes.error, estadosRes.error].filter(Boolean)
+      if (errors.length) {
+        errors.forEach(err => console.error('Error cargando reservas', err))
+        setReservas([])
+        setEstados([])
+        setSelection({})
+        setSelectedReservas([])
+        setFeedback({
+          type: 'error',
+          message: 'No se pudieron cargar las reservas. Intenta nuevamente.'
+        })
+        return
+      }
+
+      const actividades = actividadesRes.data ?? []
+      const estadosData = estadosRes.data ?? []
+
+      const agendaIds = Array.from(
+        new Set(actividades.map(item => item.idagenda).filter(Boolean))
+      )
+      const paqueteIds = Array.from(
+        new Set(actividades.map(item => item.idpaquete).filter(Boolean))
+      )
+      const clienteIds = actividades.map(item => item.idusuario).filter(Boolean)
+
+      const [
+        { data: agendasData = [], error: agendaError },
+        { data: paquetesData = [], error: paquetesError }
+      ] = await Promise.all([
+        agendaIds.length
+          ? supabase
+              .from('agenda')
+              .select('id, fecha, horainicio, horafin, idfotografo')
+              .in('id', agendaIds)
+          : Promise.resolve({ data: [], error: null }),
+        paqueteIds.length
+          ? supabase.from('paquete').select('id, nombre_paquete').in('id', paqueteIds)
+          : Promise.resolve({ data: [], error: null })
+      ])
+
+      const errorsSecundarios = [agendaError, paquetesError].filter(Boolean)
+      if (errorsSecundarios.length)
+        errorsSecundarios.forEach(err =>
+          console.error('Error cargando datos relacionados', err)
+        )
+
+      const fotografoIds = Array.from(
+        new Set((agendasData ?? []).map(a => a.idfotografo).filter(Boolean))
+      )
+      const usuarioIds = Array.from(new Set([...clienteIds, ...fotografoIds]))
+
+      const { data: usuariosData = [], error: usuariosError } = usuarioIds.length
+        ? await supabase
+            .from('usuario')
+            .select('id, username')
+            .in('id', usuarioIds)
+        : { data: [], error: null }
+
+      if (usuariosError) console.error('Error cargando usuarios relacionados', usuariosError)
+
+      const agendaMap = new Map((agendasData ?? []).map(agenda => [agenda.id, agenda]))
+      const paqueteMap = new Map((paquetesData ?? []).map(paquete => [paquete.id, paquete]))
+      const usuarioMap = new Map((usuariosData ?? []).map(usuario => [usuario.id, usuario]))
+      const estadoMap = new Map((estadosData ?? []).map(estado => [estado.id, estado]))
+
+      const formattedReservas = actividades.map(item => {
+        const agenda = agendaMap.get(item.idagenda)
+        const cliente = usuarioMap.get(item.idusuario)
+        const fotografo = agenda ? usuarioMap.get(agenda.idfotografo) : null
+        const paquete = paqueteMap.get(item.idpaquete)
+        const estado = estadoMap.get(item.idestado_actividad)
+
+        const estadoPagoInfo = getPaymentStateClasses(
+          item.estado_pago?.nombre_estado || item.estado_pago || item.idestado_pago,
+          DEFAULT_PAYMENT_STATES
+        )
+
+        return {
+          id: Number(item.id),
+          clienteId: cliente?.id != null ? Number(cliente.id) : null,
+          cliente: cliente?.username || 'Cliente sin nombre',
+          fotografoId: fotografo?.id != null ? Number(fotografo.id) : null,
+          fotografo: fotografo?.username || 'Sin asignar',
+          paquete: paquete?.nombre_paquete || 'Paquete sin asignar',
+          fecha: agenda?.fecha || null,
+          horaInicio: agenda?.horainicio || null,
+          horaFin: agenda?.horafin || null,
+          estadoId: item.idestado_actividad != null ? Number(item.idestado_actividad) : null,
+          estadoNombre: estado?.nombre_estado || 'Pendiente',
+          estadoPago: estadoPagoInfo.label,
+          estadoPagoId: estadoPagoInfo.id,
+          agendaId: item.idagenda != null ? Number(item.idagenda) : null
+        }
+      })
+
+      setEstados(estadosData)
+      setReservas(formattedReservas)
+      setSelection(
+        Object.fromEntries(
+          formattedReservas.map(reserva => [
+            reserva.id,
+            reserva.estadoId ? String(reserva.estadoId) : ''
+          ])
+        )
+      )
+      setSelectedReservas([])
+    } catch (error) {
+      console.error('Error inesperado cargando reservas', error)
+      setReservas([])
+      setEstados([])
+      setSelection({})
+      setSelectedReservas([])
+      setFeedback({
+        type: 'error',
+        message: 'Ocurrió un error inesperado cargando las reservas.'
+      })
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadReservas()
+  }, [loadReservas])
+
+  useEffect(() => {
+    setSelectedReservas(prev =>
+      prev.filter(id => safeReservas.some(reserva => reserva.id === id))
+    )
+  }, [safeReservas])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(timer)
+  }, [toast])
+
+  useEffect(() => {
+    const agendaDia = searchParams.get('agendaDia')
+    if (agendaDia) {
+      const parsed = toDate(agendaDia)
+      if (parsed) {
+        setFilters(prev => ({
+          ...(typeof prev === 'object' && prev !== null ? prev : defaultFilters),
+          fecha: parsed
+        }))
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem('admin-agenda-selected-day', agendaDia)
+        }
+      }
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('agendaDia')
+      setSearchParams(nextParams, { replace: true })
+      return
+    }
+
+    if (!currentFechaFilter && typeof window !== 'undefined') {
+      const stored = window.localStorage.getItem('admin-agenda-selected-day')
+      if (stored) {
+        const parsedStored = toDate(stored)
+        if (parsedStored) {
+          setFilters(prev => ({
+            ...(typeof prev === 'object' && prev !== null ? prev : defaultFilters),
+            fecha: parsedStored
+          }))
+        }
+      }
+    }
+  }, [currentFechaFilter, searchParams, setSearchParams])
+
+  const handleVisibleRowsChange = rows => {
+    setVisibleReservas(Array.isArray(rows) ? rows : [])
+  }
+
+  const visibleReservaIds = useMemo(
+    () => safeVisibleReservas.map(reserva => Number(reserva.id)).filter(id => !Number.isNaN(id)),
+    [safeVisibleReservas]
+  )
+
+  const allVisibleSelected = useMemo(() => {
+    if (!visibleReservaIds.length) return false
+    return visibleReservaIds.every(id => selectedReservas.includes(id))
+  }, [visibleReservaIds, selectedReservas])
+
+  const toggleSelectAllVisible = useCallback(() => {
+    if (!visibleReservaIds.length) return
+    setSelectedReservas(prev => {
+      if (visibleReservaIds.every(id => prev.includes(id))) {
+        return prev.filter(id => !visibleReservaIds.includes(id))
+      }
+      const merged = new Set(prev)
+      visibleReservaIds.forEach(id => merged.add(id))
+      return Array.from(merged)
+    })
+  }, [visibleReservaIds])
+
+  const toggleReservaSelection = useCallback(reservaId => {
+    const id = Number(reservaId)
+    setSelectedReservas(prev => {
+      if (prev.includes(id)) {
+        return prev.filter(item => item !== id)
+      }
+      return [...prev, id]
+    })
+  }, [])
+
+  const closeBulkModal = useCallback(() => {
+    setBulkActionOpen(false)
+    setBulkEstadoNombre('')
+  }, [])
+
+  const handleBulkApply = async () => {
+    if (!bulkEstadoNombre || !selectedReservas.length) return
+
+    const matchedEstado = safeEstados.find(
+      estado => normalize(estado?.nombre_estado) === normalize(bulkEstadoNombre)
+    )
+    const nuevoEstadoId = matchedEstado?.id ? Number(matchedEstado.id) : null
+
+    setBulkLoading(true)
+
+    try {
+      const response = await fetch('/api/reservas/actualizar-multiples', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reservas: selectedReservas, nuevo_estado: bulkEstadoNombre })
+      })
+
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.message || 'Solicitud rechazada')
+      }
+
+      const cantidad = result?.updated ?? selectedReservas.length
+
+      if (nuevoEstadoId) {
+        const estadoActualizado = safeEstados.find(item => Number(item.id) === nuevoEstadoId)
+        setSelection(prev => {
+          const next = { ...prev }
+          selectedReservas.forEach(reservaId => {
+            next[reservaId] = String(nuevoEstadoId)
+          })
+          return next
+        })
+
+        setReservas(prev =>
+          prev.map(item =>
+            selectedReservas.includes(item.id)
+              ? {
+                  ...item,
+                  estadoId: nuevoEstadoId,
+                  estadoNombre: estadoActualizado?.nombre_estado || bulkEstadoNombre,
+                  estadoPago:
+                    reservadaEstadoId && nuevoEstadoId === Number(reservadaEstadoId)
+                      ? anticipoInfo.label
+                      : item.estadoPago,
+                  estadoPagoId:
+                    reservadaEstadoId && nuevoEstadoId === Number(reservadaEstadoId)
+                      ? anticipoInfo.id ?? paymentStateIds.anticipo
+                      : item.estadoPagoId
+                }
+              : item
+          )
+        )
+      } else {
+        setReservas(prev =>
+          prev.map(item =>
+            selectedReservas.includes(item.id)
+              ? {
+                  ...item,
+                  estadoNombre: bulkEstadoNombre
+                }
+              : item
+          )
+        )
+      }
+
+      setToast({
+        type: 'success',
+        message: result?.message || `✅ Se actualizaron ${cantidad} reservas correctamente.`
+      })
+      setSelectedReservas([])
+      closeBulkModal()
+      setFeedback({ type: '', message: '' })
+    } catch (error) {
+      console.error('Error actualizando reservas masivamente', error)
+      setToast({
+        type: 'error',
+        message: error?.message || 'No se pudieron actualizar las reservas seleccionadas.'
+      })
+    } finally {
+      setBulkLoading(false)
+    }
+  }
+
+  const filteredReservas = useMemo(() => {
+    try {
+      const searchValue = typeof filters?.search === 'string' ? filters.search : defaultFilters.search
+      const estadoValue = filters?.estado ?? defaultFilters.estado
+      const fotografoValue = filters?.fotografo ?? defaultFilters.fotografo
+      const fechaValue = filters?.fecha ?? defaultFilters.fecha
+      const searchTerm = normalize(searchValue)
+
+      return safeReservas.filter(reserva => {
+        const matchesSearch =
+          !searchTerm ||
+          normalize(reserva.cliente).includes(searchTerm) ||
+          String(reserva.id).includes(searchValue.trim())
+
+        const matchesEstado =
+          estadoValue === 'all' || String(reserva.estadoId ?? '') === String(estadoValue)
+
+        const matchesFotografo =
+          fotografoValue === 'all' || String(reserva.fotografoId ?? '') === String(fotografoValue)
+
+        const matchesFecha = !fechaValue || isSameDay(reserva.fecha, fechaValue)
+
+        return matchesSearch && matchesEstado && matchesFotografo && matchesFecha
+      })
+    } catch (error) {
+      console.error('Error aplicando filtros de reservas', error)
+      return []
+    }
+  }, [filters, safeReservas])
+
+  const fotografoOptions = useMemo(() => {
+    const unique = new Map()
+    safeReservas.forEach(reserva => {
+      if (reserva.fotografoId) unique.set(reserva.fotografoId, reserva.fotografo)
+    })
+    return Array.from(unique.entries()).map(([id, nombre]) => ({ id, nombre }))
+  }, [safeReservas])
+
+  const openEditReserva = reserva => {
+    if (!reserva) return
+    const fechaValor = reserva.fecha ? String(reserva.fecha).split('T')[0] : ''
+    const horaValor = reserva.horaInicio ? String(reserva.horaInicio).slice(0, 5) : ''
+    setEditingReserva(reserva)
+    setEditForm({
+      fecha: fechaValor,
+      hora: horaValor,
+      idfotografo: reserva.fotografoId ? String(reserva.fotografoId) : '',
+      estado: reserva.estadoId ? String(reserva.estadoId) : ''
+    })
+  }
+
+  const closeEditReserva = () => {
+    setEditingReserva(null)
+    setEditForm({ fecha: '', hora: '', idfotografo: '', estado: '' })
+  }
+
+  const updateEditField = (field, value) => {
+    setEditForm(prev => ({ ...prev, [field]: value }))
+  }
+
+  useFocusTrap(bulkModalRef, bulkActionOpen, closeBulkModal)
+  useFocusTrap(editModalRef, Boolean(editingReserva), closeEditReserva)
+
+  const handleEditSubmit = async event => {
+    event.preventDefault()
+    if (!editingReserva) return
+
+    const fecha = editForm.fecha.trim()
+    const hora = editForm.hora.trim()
+    const idfotografo = editForm.idfotografo ? Number(editForm.idfotografo) : null
+    const estadoId = editForm.estado ? Number(editForm.estado) : null
+
+    if (!fecha) {
+      setToast({ type: 'error', message: 'Selecciona una fecha para la reserva.' })
+      return
+    }
+
+    if (!hora) {
+      setToast({ type: 'error', message: 'Ingresa una hora válida para la reserva.' })
+      return
+    }
+
+    const estadoSeleccionado = estadoId
+      ? safeEstados.find(item => Number(item.id) === estadoId)?.nombre_estado || ''
+      : ''
+
+    const payload = {
+      fecha,
+      hora,
+      idfotografo,
+      estado: estadoSeleccionado
+    }
+
+    setSavingEdit(true)
+
+    try {
+      let successMessage = '✅ Reserva actualizada correctamente.'
+      try {
+        const response = await fetch(`/api/reservas/${editingReserva.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result?.success) {
+          throw new Error(
+            result?.message || 'No se pudo actualizar la reserva desde el servicio.'
+          )
+        }
+
+        if (result?.message) {
+          successMessage = result.message
+        }
+      } catch (apiError) {
+        console.warn(
+          'Fallo la ruta /api/reservas/:id, usando Supabase como respaldo',
+          apiError
+        )
+        const agendaUpdate = {
+          fecha,
+          horainicio: hora,
+          horafin: editingReserva.horaFin
+            ? String(editingReserva.horaFin).slice(0, 5)
+            : hora,
+          idfotografo: idfotografo
+        }
+
+        if (editingReserva.agendaId) {
+          const { error: agendaError } = await supabase
+            .from('agenda')
+            .update(agendaUpdate)
+            .eq('id', editingReserva.agendaId)
+
+          if (agendaError) throw agendaError
+        } else if (idfotografo) {
+          const { error: agendaInsertError } = await supabase
+            .from('agenda')
+            .upsert(
+              {
+                idfotografo,
+                fecha,
+                horainicio: hora,
+                horafin: hora,
+                disponible: false
+              },
+              { onConflict: 'idfotografo,fecha' }
+            )
+
+          if (agendaInsertError) throw agendaInsertError
+        }
+
+        if (estadoId) {
+          const { error: actividadError } = await supabase
+            .from('actividad')
+            .update({ idestado_actividad: estadoId })
+            .eq('id', editingReserva.id)
+
+          if (actividadError) throw actividadError
+        }
+      }
+
+      const fotografoNombre = idfotografo
+        ? (
+            fotografoOptions.find(option => Number(option.id) === Number(idfotografo))
+              ?.nombre || 'Fotógrafo asignado'
+          )
+        : 'Por asignar'
+      const estadoNombre = estadoSeleccionado || editingReserva.estadoNombre
+
+      setReservas(prev =>
+        prev.map(item =>
+          item.id === editingReserva.id
+            ? {
+                ...item,
+                fecha,
+                horaInicio: hora,
+                fotografoId: idfotografo,
+                fotografo: fotografoNombre,
+                estadoId: estadoId ?? item.estadoId,
+                estadoNombre
+              }
+            : item
+        )
+      )
+      setSelection(prev => ({ ...prev, [editingReserva.id]: estadoId ? String(estadoId) : '' }))
+      setToast({ type: 'success', message: successMessage })
+      closeEditReserva()
+    } catch (error) {
+      console.error('No se pudo actualizar la reserva', error)
+      setToast({
+        type: 'error',
+        message: 'No se pudo actualizar la reserva seleccionada.'
+      })
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
+  // ---- IMPORTANTE: estas funciones van ANTES de reservasColumns ----
+
+  const onFilterChange = (field, value) => {
+    setFilters(prev => ({
+      ...(typeof prev === 'object' && prev !== null ? prev : defaultFilters),
+      [field]: value
+    }))
+  }
+
+  const handleClearFechaFilter = () => {
+    setFilters(prev => ({
+      ...(typeof prev === 'object' && prev !== null ? prev : defaultFilters),
+      fecha: null
+    }))
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('admin-agenda-selected-day')
+    }
+    setToast({ type: 'success', message: 'Filtro de fecha eliminado' })
+  }
+
+  const onSelectEstado = (reservaId, value) => {
+    setSelection(prev => ({ ...prev, [reservaId]: value }))
+  }
+
+  const actualizarEstado = useCallback(
+    async reserva => {
+      const nuevoEstadoId = Number(selection[reserva.id])
+      if (!nuevoEstadoId || nuevoEstadoId === reserva.estadoId) return
+
+      const estadoActual = normalize(reserva.estadoNombre)
+      if (estadoActual === 'entregada') {
+        setFeedback({
+          type: 'warning',
+          message: 'Las reservas entregadas no pueden modificarse.'
+        })
+        return
+      }
+
+      setUpdatingId(reserva.id)
+      setFeedback({ type: '', message: '' })
+
+      const payload = { idestado_actividad: nuevoEstadoId }
+      if (reservadaEstadoId && nuevoEstadoId === Number(reservadaEstadoId)) {
+        payload.idestado_pago = paymentStateIds.anticipo
+      }
+
+      const { error } = await supabase.from('actividad').update(payload).eq('id', reserva.id)
+
+      if (error) {
+        console.error('Error actualizando estado', error)
+        setFeedback({
+          type: 'error',
+          message: 'No se pudo actualizar el estado. Intenta de nuevo.'
+        })
+      } else {
+        const estadoActualizado = safeEstados.find(item => Number(item.id) === nuevoEstadoId)
+        setSelection(prev => ({ ...prev, [reserva.id]: String(nuevoEstadoId) }))
+        setReservas(prev =>
+          prev.map(item =>
+            item.id === reserva.id
+              ? {
+                  ...item,
+                  estadoId: nuevoEstadoId,
+                  estadoNombre: estadoActualizado?.nombre_estado || item.estadoNombre,
+                  estadoPago:
+                    reservadaEstadoId && nuevoEstadoId === Number(reservadaEstadoId)
+                      ? anticipoInfo.label
+                      : item.estadoPago,
+                  estadoPagoId:
+                    reservadaEstadoId && nuevoEstadoId === Number(reservadaEstadoId)
+                      ? anticipoInfo.id ?? paymentStateIds.anticipo
+                      : item.estadoPagoId
+                }
+              : item
+          )
+        )
+        setFeedback({ type: 'success', message: 'Estado actualizado correctamente.' })
+      }
+
+      setUpdatingId(null)
+    },
+    [
+      anticipoInfo.id,
+      anticipoInfo.label,
+      paymentStateIds.anticipo,
+      reservadaEstadoId,
+      safeEstados,
+      selection
+    ]
+  )
+
+  // -----------------------------------------------------------------
+
+  const reservasColumns = useMemo(
+    () => [
+      {
+        id: 'seleccionar',
+        label: 'Seleccionar',
+        header: <span className="sr-only">Seleccionar reserva</span>,
+        hideOnMobile: true,
+        align: 'center',
+        render: reserva => (
+          <input
+            type="checkbox"
+            className="reserva-checkbox"
+            checked={selectedReservas.includes(reserva.id)}
+            onChange={() => toggleReservaSelection(reserva.id)}
+            aria-label={`Seleccionar reserva #${reserva.id}`}
+          />
+        )
+      },
+      {
+        id: 'reserva',
+        label: 'Reserva',
+        render: reserva => {
+          const isChecked = selectedReservas.includes(reserva.id)
+          return (
+            <div className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                className="reserva-checkbox mt-1 md:hidden"
+                checked={isChecked}
+                onChange={() => toggleReservaSelection(reserva.id)}
+                aria-label={`Seleccionar reserva #${reserva.id}`}
+              />
+              <div className="space-y-1">
+                <span className="text-sm font-semibold text-umber">#{reserva.id}</span>
+                <p className="text-sm text-slate-600">{reserva.cliente}</p>
+                <p className="text-xs text-slate-500">{reserva.paquete}</p>
+              </div>
+            </div>
+          )
+        }
+      },
+      {
+        id: 'programacion',
+        label: 'Programación',
+        render: reserva => {
+          const fotografoNombre =
+            reserva.fotografo && reserva.fotografo !== 'Sin asignar'
+              ? reserva.fotografo
+              : 'Por asignar'
+          return (
+            <div className="space-y-1 text-sm text-slate-600">
+              <p className="font-semibold text-umber">{formatDate(reserva.fecha)}</p>
+              <p className="text-xs text-slate-500">
+                {formatTimeRange(reserva.horaInicio, reserva.horaFin)}
+              </p>
+              <p className="text-xs text-slate-500">Fotógrafo: {fotografoNombre}</p>
+            </div>
+          )
+        }
+      },
+      {
+        id: 'estado',
+        label: 'Estado actual',
+        hideOnMobile: true,
+        render: reserva => {
+          const estadoStyles = getEstadoStyles(reserva.estadoNombre)
+          return (
+            <span
+              className="inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em]"
+              style={{ backgroundColor: estadoStyles.bg, color: estadoStyles.text }}
+            >
+              {reserva.estadoNombre}
+            </span>
+          )
+        }
+      },
+      {
+        id: 'editar',
+        label: 'Editar',
+        render: reserva => (
+          <button
+            type="button"
+            className="reservation-edit-button"
+            onClick={() => openEditReserva(reserva)}
+            aria-label={`Editar reserva #${reserva.id}`}
+          >
+            ✏️ Editar reserva
+          </button>
+        )
+      },
+      {
+        id: 'acciones',
+        label: 'Actualizar estado',
+        render: reserva => {
+          const estadoActual = normalize(reserva.estadoNombre)
+          const entregada = estadoActual === 'entregada'
+          const selectedValue = selection[reserva.id] ?? ''
+          const hasSelection = selectedValue !== ''
+          const sameEstado =
+            hasSelection &&
+            reserva.estadoId != null &&
+            Number(selectedValue) === Number(reserva.estadoId)
+          const disableAction = entregada || updatingId === reserva.id
+
+          return (
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-4">
+              <select
+                className="rounded-2xl border border-[color:var(--border)] bg-white px-3 py-2 text-sm shadow-sm"
+                value={selectedValue}
+                onChange={event => onSelectEstado(reserva.id, event.target.value)}
+                disabled={entregada}
+              >
+                <option value="">Selecciona un estado</option>
+                {safeEstados.map(estado => (
+                  <option key={estado.id} value={estado.id}>
+                    {estado.nombre_estado}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => actualizarEstado(reserva)}
+                disabled={disableAction || !hasSelection || sameEstado}
+              >
+                {updatingId === reserva.id ? 'Guardando…' : 'Confirmar cambio'}
+              </button>
+            </div>
+          )
+        }
+      }
+    ],
+    [
+      actualizarEstado,
+      safeEstados,
+      selection,
+      selectedReservas,
+      toggleReservaSelection,
+      updatingId
+    ]
+  )
+
+  return (
+    <div className="admin-page space-y-6">
+      {toast && (
+        <div className={`admin-toast admin-toast--${toast.type}`} role="status">
+          <span>{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Cerrar notificación"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      <div className="admin-section space-y-4">
+        <header className="admin-header">
+          <div>
+            <h1 className="text-xl font-semibold text-umber">Gestión de reservas</h1>
+            <p className="muted text-sm">
+              Administra el estado de cada actividad y mantén al equipo alineado.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={loadReservas}
+              className="btn btn-ghost"
+              disabled={loading}
+            >
+              {loading ? 'Actualizando…' : 'Actualizar datos'}
+            </button>
+          </div>
+        </header>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <label className="grid gap-1 text-sm">
+            <span className="font-medium text-slate-700">Búsqueda rápida</span>
+            <input
+              className="border rounded-xl2 px-3 py-2"
+              placeholder="Cliente o ID de reserva"
+              value={filters?.search ?? ''}
+              onChange={event => onFilterChange('search', event.target.value)}
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm">
+            <span className="font-medium text-slate-700">Filtrar por estado</span>
+            <select
+              className="border rounded-xl2 px-3 py-2"
+              value={filters?.estado ?? 'all'}
+              onChange={event => onFilterChange('estado', event.target.value)}
+            >
+              <option value="all">Todos los estados</option>
+              {safeEstados.map(estado => (
+                <option key={estado.id} value={estado.id}>
+                  {estado.nombre_estado}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="grid gap-1 text-sm">
+            <span className="font-medium text-slate-700">Filtrar por fotógrafo</span>
+            <select
+              className="border rounded-xl2 px-3 py-2"
+              value={filters?.fotografo ?? 'all'}
+              onChange={event => onFilterChange('fotografo', event.target.value)}
+            >
+              <option value="all">Todos los fotógrafos</option>
+              {fotografoOptions.map(option => (
+                <option key={option.id} value={option.id}>
+                  {option.nombre}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="grid gap-2">
+            <AdminDatePicker
+              label="Filtrar por fecha"
+              value={currentFechaFilter}
+              onChange={date => onFilterChange('fecha', date ?? null)}
+              placeholder="Selecciona un día"
+            />
+            {currentFechaFilter && (
+              <button
+                type="button"
+                className="agenda-clear max-w-fit"
+                onClick={handleClearFechaFilter}
+                aria-label="Quitar filtro de fecha"
+              >
+                <span aria-hidden="true">✕</span>
+                <span className="ml-1 text-sm font-semibold text-umber">Quitar filtro</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {feedback.message && (
+          <div
+            className={`rounded-3xl px-4 py-3 text-sm ${
+              feedback.type === 'error'
+                ? 'bg-red-50 text-red-700 border border-red-100'
+                : feedback.type === 'success'
+                ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                : 'bg-amber-50 text-amber-700 border border-amber-100'
+            }`}
+          >
+            {feedback.message}
+          </div>
+        )}
+      </div>
+
+      <div className="admin-section space-y-4">
+        <div className="admin-header">
+          <div>
+            <h2 className="text-lg font-semibold text-umber">Reservas registradas</h2>
+            <p className="muted text-sm">Visualiza y actualiza el estado de cada actividad.</p>
+          </div>
+          <span className="text-xs uppercase tracking-[0.3em] text-slate-500">
+            {filteredReservas.length} registros
+          </span>
+        </div>
+
+        {loading ? (
+          <p className="muted text-sm">Cargando reservas…</p>
+        ) : filteredReservas.length ? (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-[#E4DDCC] bg-[#FAF8F4] px-4 py-3">
+              <label className="flex items-center gap-2 text-sm font-semibold text-umber">
+                <input
+                  type="checkbox"
+                  className="reserva-checkbox"
+                  onChange={toggleSelectAllVisible}
+                  checked={allVisibleSelected}
+                  disabled={!visibleReservaIds.length}
+                  aria-label="Seleccionar todas las reservas visibles"
+                />
+                Seleccionar todo
+              </label>
+              <span className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                {selectedReservas.length} seleccionadas
+              </span>
+            </div>
+
+            <AdminDataTable
+              columns={reservasColumns}
+              rows={filteredReservas}
+              rowKey={reserva => reserva.id}
+              caption={`Total de reservas: ${filteredReservas.length}`}
+              onVisibleRowsChange={handleVisibleRowsChange}
+            />
+
+            <div className="bulk-action-bar">
+              <button
+                type="button"
+                className="bulk-action-button"
+                onClick={() => {
+                  setBulkEstadoNombre('')
+                  setBulkActionOpen(true)
+                }}
+                disabled={!selectedReservas.length || bulkLoading}
+              >
+                Actualizar estado seleccionado
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="muted text-sm">
+            No hay reservas que coincidan con los filtros seleccionados.
+          </p>
+        )}
+      </div>
+
+      <div className="admin-section">
+        <AdminHelpCard title="Consejos de seguimiento">
+          <p>Aprovecha los filtros para coordinar rápidamente las actividades pendientes.</p>
+          <p>Confirma las reservas recién aprobadas para notificar a tu cliente y equipo.</p>
+          <p>
+            Una vez marcada como entregada, la reserva queda bloqueada para mantener el historial.
+          </p>
+        </AdminHelpCard>
+      </div>
+
+      {bulkActionOpen && (
+        <div
+          className="admin-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="bulk-action-title"
+          onClick={event => {
+            if (event.target === event.currentTarget) {
+              closeBulkModal()
+            }
+          }}
+        >
+          <div ref={bulkModalRef} className="admin-modal__content" tabIndex={-1}>
+            <h3 id="bulk-action-title" className="text-lg font-semibold text-umber">
+              Actualizar estado masivo
+            </h3>
+            <p className="muted text-sm">
+              Selecciona el nuevo estado para {selectedReservas.length} reservas elegidas.
+            </p>
+            <label className="grid gap-2 text-sm">
+              <span className="font-semibold text-slate-700">Nuevo estado</span>
+              <select
+                className="border rounded-xl2 px-3 py-2"
+                value={bulkEstadoNombre}
+                onChange={event => setBulkEstadoNombre(event.target.value)}
+              >
+                <option value="">Selecciona un estado</option>
+                {MASIVE_ESTADOS.map(estado => (
+                  <option key={estado} value={estado}>
+                    {estado}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="flex justify-end gap-3 pt-4">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={closeBulkModal}
+                disabled={bulkLoading}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="bulk-action-apply"
+                onClick={handleBulkApply}
+                disabled={!bulkEstadoNombre || bulkLoading}
+              >
+                {bulkLoading ? 'Aplicando…' : 'Aplicar cambios'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingReserva && (
+        <div
+          className="admin-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="editar-reserva-titulo"
+          onClick={event => {
+            if (event.target === event.currentTarget) closeEditReserva()
+          }}
+        >
+          <div ref={editModalRef} className="admin-modal__content max-w-xl space-y-4" tabIndex={-1}>
+            <header className="space-y-1">
+              <h3 id="editar-reserva-titulo" className="text-lg font-semibold text-umber">
+                Editar reserva #{editingReserva.id}
+              </h3>
+              <p className="muted text-sm">
+                Actualiza la fecha, hora, fotógrafo asignado o el estado actual.
+              </p>
+            </header>
+
+            <form onSubmit={handleEditSubmit} className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-slate-700">Fecha</span>
+                <input
+                  type="date"
+                  className="border rounded-xl2 px-3 py-2"
+                  value={editForm.fecha}
+                  onChange={event => updateEditField('fecha', event.target.value)}
+                  required
+                />
+              </label>
+
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-slate-700">Hora</span>
+                <input
+                  type="time"
+                  className="border rounded-xl2 px-3 py-2"
+                  value={editForm.hora}
+                  onChange={event => updateEditField('hora', event.target.value)}
+                  required
+                />
+              </label>
+
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-slate-700">Fotógrafo asignado</span>
+                <select
+                  className="border rounded-xl2 px-3 py-2"
+                  value={editForm.idfotografo}
+                  onChange={event => updateEditField('idfotografo', event.target.value)}
+                >
+                  <option value="">Sin asignar</option>
+                  {fotografoOptions.map(option => (
+                    <option key={option.id} value={option.id}>
+                      {option.nombre}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-slate-700">Estado</span>
+                <select
+                  className="border rounded-xl2 px-3 py-2"
+                  value={editForm.estado}
+                  onChange={event => updateEditField('estado', event.target.value)}
+                >
+                  <option value="">Mantener actual</option>
+                  {safeEstados.map(estado => (
+                    <option key={estado.id} value={estado.id}>
+                      {estado.nombre_estado}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="md:col-span-2 flex justify-end gap-3 pt-2">
+                <button type="button" className="btn btn-ghost" onClick={closeEditReserva}>
+                  Cancelar
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={savingEdit}>
+                  {savingEdit ? 'Guardando…' : 'Guardar cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
