@@ -1,79 +1,182 @@
-import GalleryRail from '../components/GalleryRail'
+import { useState, useEffect } from "react"
 
-const highlights = [
-  {
-    title: 'Dirección artística integral',
-    description: 'Curamos cada detalle de iluminación, vestuario y actitud para proyectar tu esencia con elegancia y confianza.',
-  },
-  {
-    title: 'Experiencias personalizadas',
-    description: 'Creamos ambientes a medida, guiando cada pose y emoción para lograr fotografías naturales y memorables.',
-  },
-  {
-    title: 'Entrega profesional',
-    description: 'Postproducción cuidada, galerías privadas y formatos listos para impresión o difusión digital.',
-  },
-]
+export default function Home() {
 
-export default function Home(){
+  /* =========================
+     ARRAY DE IMÁGENES Y VIDEOS
+     👉 Solo agrega más objetos aquí
+  ========================== */
+  const mediaItems = [
+    { type: "video", src: "/video/imagen2.mp4", col: "col-span-2 md:col-span-3", row: "row-span-2" },
+    { type: "image", src: "/img/imagen3.jpg", col: "col-span-2 md:col-span-3", row: "row-span-2" },
+    { type: "image", src: "/img/imagen4.jpg" },
+    { type: "image", src: "/img/imagen5.jpg", col: "col-span-2", row: "row-span-2" },
+    { type: "image", src: "/img/imagen6.jpg" },
+    { type: "image", src: "/img/imagen7.jpg" },
+    { type: "video", src: "/video/imagen8.mp4", row: "row-span-2" },
+    { type: "image", src: "/img/imagen9.jpg" },
+    { type: "image", src: "/img/imagen10.jpg" },
+    { type: "image", src: "/img/imagen11.jpg", col: "col-span-2" },
+    { type: "image", src: "/img/imagen12.jpg", row: "row-span-2" },
+    { type: "image", src: "/img/imagen13.jpg" },
+    { type: "image", src: "/img/imagen14.jpg" },
+    { type: "image", src: "/img/imagen15.jpg" }
+
+  ]
+
+  /* =========================
+     ESTADO DEL LIGHTBOX
+  ========================== */
+  const [selectedIndex, setSelectedIndex] = useState(null)
+
+  const selectedMedia = selectedIndex !== null ? mediaItems[selectedIndex] : null
+
+  /* =========================
+     NAVEGACIÓN CON TECLADO
+     ESC = cerrar
+     ← → = navegar
+  ========================== */
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (selectedIndex === null) return
+
+      if (e.key === "Escape") {
+        setSelectedIndex(null)
+      }
+
+      if (e.key === "ArrowRight") {
+        setSelectedIndex((prev) => (prev + 1) % mediaItems.length)
+      }
+
+      if (e.key === "ArrowLeft") {
+        setSelectedIndex((prev) => (prev - 1 + mediaItems.length) % mediaItems.length)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [selectedIndex, mediaItems.length])
+
+  /* =========================
+     FUNCIONES DE NAVEGACIÓN
+  ========================== */
+  const nextMedia = (e) => {
+    e.stopPropagation()
+    setSelectedIndex((prev) => (prev + 1) % mediaItems.length)
+  }
+
+  const prevMedia = (e) => {
+    e.stopPropagation()
+    setSelectedIndex((prev) => (prev - 1 + mediaItems.length) % mediaItems.length)
+  }
+
   return (
-    <div className="space-y-8">
-      <section id="inicio" className="page-section pt-8">
-        <div className="container-1120 grid gap-8 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)] items-center">
-          <div className="space-y-4">
-            <span className="section-eyebrow">Aguín Fotografía</span>
-            <h1 className="leading-tight">
-              Historias visuales que honran tu esencia
-            </h1>
-            <p className="section-subtitle max-w-xl">
-              Sesiones fotográficas con dirección artística, luz cálida y estilo editorial para retratar momentos que trascienden.
-            </p>
-            <div className="flex flex-wrap gap-3">
-              <a className="btn btn-primary" href="/reservar">Reservar sesión</a>
-              <a className="btn btn-ghost border border-[color:var(--border)]" href="/portafolio">Ver portafolio</a>
+    <div>
+
+      {/* =========================
+         HERO PRINCIPAL
+      ========================== */}
+      <section className="w-full">
+        <div className="w-full h-[80vh] overflow-hidden">
+          <img
+            src="/img/imagen1.jpg"
+            alt="Hero"
+            className="w-full h-full object-cover"
+          />
+        </div>
+      </section>
+
+      {/* =========================
+         COLLAGE DINÁMICO
+      ========================== */}
+      <section className="p-0 md:p-1">
+        <div className="grid grid-cols-4 md:grid-cols-6 gap-2 auto-rows-[160px] grid-flow-dense">
+
+          {mediaItems.map((item, index) => (
+            <div
+              key={index}
+              className={`relative overflow-hidden cursor-pointer group ${item.col || ""} ${item.row || ""}`}
+              onClick={() => setSelectedIndex(index)}
+            >
+
+              {item.type === "image" ? (
+                <img
+                  src={item.src}
+                  className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                />
+              ) : (
+                <video
+                  src={item.src}
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                  preload="metadata"   // 👈 permite que cargue vista previa
+                  poster="/img/preview.jpg" // 👈 opcional (miniatura mientras carga)
+                  className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                />
+
+              )}
+
             </div>
-          </div>
-          <div className="relative">
-            <figure className="relative overflow-hidden rounded-[2.75rem] border border-[color:var(--border)] shadow-soft aspect-[4/5] md:aspect-[5/6]">
-              <img src="/img/hero-texture.svg" alt="Fondo artístico" className="absolute inset-0 h-full w-full object-cover" />
-              <img
-                src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=1200&auto=format&fit=crop"
-                alt="Sesión fotográfica en estudio"
-                className="absolute inset-0 h-full w-full object-cover mix-blend-multiply opacity-80"
-              />
-              <div className="absolute inset-0 bg-gradient-to-b from-white/5 via-transparent to-[#443A35]/75"></div>
-              <figcaption className="relative h-full p-8 flex flex-col justify-end text-white gap-3">
-                <span className="text-xs uppercase tracking-[0.4em] text-amber-200/80">Retratos editoriales</span>
-                <p className="text-2xl font-display leading-snug">Iluminación sofisticada y edición fina para resultados de impacto.</p>
-              </figcaption>
-            </figure>
-          </div>
+          ))}
+
         </div>
       </section>
 
-      <section className="page-section pt-0">
-        <div className="section-shell">
-          <div className="section-heading">
-            <span className="section-eyebrow">Experiencia Aguín</span>
-            <h2 className="leading-snug">Una atmósfera creada para inspirarte</h2>
-            <p className="section-subtitle">
-              Desde la preproducción hasta la entrega final, te acompañamos con un proceso cuidado, transparente y lleno de inspiración.
-            </p>
-          </div>
-          <div className="grid gap-6 md:grid-cols-3">
-            {highlights.map(item => (
-              <article key={item.title} className="card">
-                <div className="card-body space-y-3">
-                  <h3 className="text-xl font-semibold text-umber">{item.title}</h3>
-                  <p className="text-sm leading-relaxed text-slate-600">{item.description}</p>
-                </div>
-              </article>
-            ))}
-          </div>
-        </div>
-      </section>
+      {/* =========================
+         LIGHTBOX FULLSCREEN
+      ========================== */}
+      {selectedMedia && (
+        <div
+          className="fixed inset-0 bg-black/90 flex items-center justify-center z-50"
+          onClick={() => setSelectedIndex(null)}
+        >
 
-      <GalleryRail />
+          {/* BOTÓN CERRAR */}
+          <button
+            className="absolute top-5 right-5 text-white text-3xl"
+            onClick={() => setSelectedIndex(null)}
+          >
+            ✕
+          </button>
+
+          {/* FLECHA IZQUIERDA */}
+          <button
+            className="absolute left-5 text-white text-4xl"
+            onClick={prevMedia}
+          >
+            ‹
+          </button>
+
+          {/* CONTENIDO (IMAGEN O VIDEO) */}
+          {selectedMedia.type === "image" ? (
+            <img
+              src={selectedMedia.src}
+              className="max-w-[90%] max-h-[90%] object-contain"
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <video
+              src={selectedMedia.src}
+              controls
+              autoPlay
+              className="max-w-[90%] max-h-[90%] object-contain"
+              onClick={(e) => e.stopPropagation()}
+            />
+          )}
+
+          {/* FLECHA DERECHA */}
+          <button
+            className="absolute right-5 text-white text-4xl"
+            onClick={nextMedia}
+          >
+            ›
+          </button>
+
+        </div>
+      )}
+
     </div>
   )
 }

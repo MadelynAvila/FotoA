@@ -95,7 +95,7 @@ export default function Footer(){
       <div className="border-t border-white/10 bg-[#1a140f]/90">
         <div className="container-1120 flex flex-col items-center gap-2 py-6 text-center text-xs text-[#d4c5b5]/80 md:flex-row md:justify-between md:text-left">
           <span>© {year} Aguín Fotografía. Todos los derechos reservados.</span>
-          <span className="text-[13px]">Diseño minimalista para una experiencia serena.</span>
+          <span className="text-[13px]"></span>
         </div>
       </div>
     </footer>
