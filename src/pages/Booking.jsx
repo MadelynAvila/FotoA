@@ -643,231 +643,202 @@ export default function Booking() {
     return () => { cancelado = true }
   }, [form.fecha, form.horaInicio, form.horaFin, fotografosList])
 
-  /** Asignar fotógrafo automáticamente */
-  useEffect(() => {
-    setForm(prev => {
-      if (fotografosList.length === 0) return { ...prev, fotografoId: '' }
-      const disponible = Object.entries(disponibilidadFotografos).find(([, v]) => v)
-      const nuevoId = disponible ? String(disponible[0]) : ''
-      return prev.fotografoId === nuevoId ? prev : { ...prev, fotografoId: nuevoId }
+//** Envio del formulario */
+/**/////////////////////////////////////////////////////////////****************//// Envío del formulario */
+const handleSubmit = async (e) => {
+  e.preventDefault()
+
+  setError('')
+  setMensaje('')
+  setEnviando(true)
+
+  try {
+
+  if (!form.fecha || !form.horaInicio || !form.horaFin) {
+    setError('Selecciona fecha y horario.')
+    return
+  }
+
+  const paqueteIdNumerico = Number(form.paqueteId)
+
+  if (!paqueteIdNumerico) {
+    setError('Selecciona un paquete válido.')
+    return
+  }
+
+  /** FOTÓGRAFO AUTOMÁTICO */
+  let fotografoIdNumerico = Number(form.fotografoId)
+
+  if (!fotografoIdNumerico) {
+
+    const fotografosDisponibles = fotografos.filter(f =>
+      disponibilidadFotografos[f.id]
+    )
+
+    if (!fotografosDisponibles.length) {
+      setError('No hay fotógrafos disponibles para esta fecha.')
+      return
+    }
+
+    /** obtener reservas del día */
+    const { data: reservasDia } = await supabase
+      .from('agenda')
+      .select('idfotografo')
+      .eq('fecha', form.fecha)
+
+    /** contar reservas */
+    const contador = {}
+
+    reservasDia?.forEach(r => {
+      contador[r.idfotografo] = (contador[r.idfotografo] || 0) + 1
     })
-  }, [disponibilidadFotografos, fotografosList])
 
-  /** Envío del formulario */
-  const handleSubmit = async e => {
-    e.preventDefault()
-    setMensaje('')
-    setError('')
+    /** ordenar por menos reservas */
+    fotografosDisponibles.sort((a, b) => {
+      const reservasA = contador[a.id] || 0
+      const reservasB = contador[b.id] || 0
+      return reservasA - reservasB
+    })
 
-    if (!user) {
-      setError('Debes iniciar sesión para reservar una sesión.')
+    fotografoIdNumerico = fotografosDisponibles[0].id
+  }
+
+  const horaInicioSQL = `${form.horaInicio}:00`
+  const horaFinSQL = `${form.horaFin}:00`
+  
+    /** VALIDAR HORARIO OCUPADO */
+    const { data: conflicto } = await supabase
+      .from('agenda')
+      .select('id')
+      .eq('idfotografo', fotografoIdNumerico)
+      .eq('fecha', form.fecha)
+      .or(`horainicio.eq.${horaInicioSQL},horafin.eq.${horaFinSQL}`)
+
+    if (conflicto && conflicto.length > 0) {
+      setError('El horario ya está ocupado.')
       return
     }
 
-    const {
-      nombre,
-      telefono,
-      correo,
-      paqueteId,
-      fecha,
-      horaInicio,
-      horaFin,
-      ubicacion,
-      formaPago,
-      fotografoId
-    } = form
+    /** BUSCAR USUARIO POR CORREO */
+    const { data: usuarioExistente } = await supabase
+      .from('usuario')
+      .select('id')
+      .eq('correo', form.correo)
+      .maybeSingle()
 
-    if (!nombre || !telefono || !correo || !paqueteId || !fecha || !horaInicio || !horaFin || !ubicacion || !formaPago) {
-      setError('Por favor completa todos los campos antes de enviar la reserva.')
-      return
-    }
+    let usuarioId
 
-    const metodoPagoValido = PAYMENT_METHODS.some((metodo) => metodo.value === formaPago)
-    if (!metodoPagoValido) {
-      setError('Selecciona un método de pago válido (Efectivo o Transferencia bancaria).')
-      return
-    }
+    /** SI EXISTE USUARIO */
+    if (usuarioExistente) {
+      usuarioId = usuarioExistente.id
+    } 
+    else {
 
-    const fechaSeleccionada = normalizarFechaInput(fecha)
-    const rangoDiaSeleccionado = obtenerRangoDiaUTC(fechaSeleccionada)
-    if (!fechaSeleccionada || !rangoDiaSeleccionado) {
-      setError('Selecciona una fecha válida para continuar con la reserva.')
-      return
-    }
-
-    if (!fotografoId) {
-      setError('No hay fotógrafos disponibles para el horario seleccionado.')
-      return
-    }
-
-    const minutosInicio = horaATotalMinutos(horaInicio)
-    const minutosFin = horaATotalMinutos(horaFin)
-    if (minutosInicio === null || minutosFin === null || minutosInicio >= minutosFin) {
-      setError('La hora de fin debe ser posterior a la hora de inicio.')
-      return
-    }
-
-    if (disponibilidadFotografos[fotografoId] === false) {
-      const detalleAgenda = agendaDisponiblePorFotografo[fotografoId]
-      if (detalleAgenda === null) {
-        setError('El horario seleccionado está demasiado cerca de otra sesión.')
-      } else {
-        setError('El fotógrafo seleccionado no está disponible en ese horario.')
-      }
-      return
-    }
-
-    try {
-      setEnviando(true)
-
-      const { data: clienteExistente, error: clienteExistenteError } = await supabase
-        .from('cliente')
-        .select('idcliente')
-        .eq('idusuario', user.id)
-        .maybeSingle()
-
-      if (clienteExistenteError && clienteExistenteError.code !== 'PGRST116') {
-        setError('No fue posible validar la información del cliente.')
-        return
-      }
-
-      if (!clienteExistente?.idcliente) {
-        const { error: nuevoClienteError } = await supabase
-          .from('cliente')
-          .insert([{ idusuario: user.id, Descuento: 0 }])
-          .select('idcliente')
-          .single()
-
-        if (nuevoClienteError) {
-          setError('No fue posible registrar la información del cliente.')
-          return
-        }
-      }
-
-      const horaInicioSQL = formatearHoraSQL(horaInicio)
-      const horaFinSQL = formatearHoraSQL(horaFin)
-      if (!horaInicioSQL || !horaFinSQL) {
-        setError('Selecciona un horario válido para continuar.')
-        return
-      }
-
-      const { data: sesionesFotografo, error: sesionesError } = await supabase
-        .from('agenda')
-        .select('id, horainicio, horafin')
-        .eq('idfotografo', Number(fotografoId))
-        .eq('fecha', fechaSeleccionada)
-
-      if (sesionesError) {
-        setError('No fue posible validar la agenda del fotógrafo.')
-        return
-      }
-
-      const conflicto = (sesionesFotografo ?? []).some(sesion => {
-        const iniSesion = horaATotalMinutos(sesion.horainicio)
-        const finSesion = horaATotalMinutos(sesion.horafin)
-        if (iniSesion === null || finSesion === null) return false
-
-        const seSuperponen = minutosFin > iniSesion && minutosInicio < finSesion
-        if (seSuperponen) return true
-
-        const diferenciaAnterior = minutosInicio - finSesion
-        if (diferenciaAnterior >= 0 && diferenciaAnterior < MIN_BUFFER_MINUTES) return true
-
-        const diferenciaPosterior = iniSesion - minutosFin
-        if (diferenciaPosterior >= 0 && diferenciaPosterior < MIN_BUFFER_MINUTES) return true
-
-        return false
-      })
-
-      if (conflicto) {
-        setError('El horario seleccionado está demasiado cerca de otra sesión.')
-        return
-      }
-
-      const { data: nuevaAgenda, error: nuevaAgendaError } = await supabase
-        .from('agenda')
+      /** CREAR USUARIO NUEVO */
+      const { data: nuevoUsuario, error: usuarioError } = await supabase
+        .from('usuario')
         .insert([
           {
-            fecha: fechaSeleccionada,
-            horainicio: horaInicioSQL,
-            horafin: horaFinSQL,
-            disponible: false,
-            idfotografo: Number(fotografoId)
+            username: form.nombre,
+            correo: form.correo,
+            telefono: form.telefono,
+            idrol: 2,
+            idestado: 1,
+            fecha_registro: new Date()
           }
         ])
         .select('id')
         .single()
 
-      if (nuevaAgendaError || !nuevaAgenda?.id) {
-        setError('Error creando la agenda de la reserva.')
+      if (usuarioError) {
+        setError('No fue posible crear el usuario.')
         return
       }
 
-      const agendaId = nuevaAgenda.id
-
-      const paqueteSel = paquetes.find(
-        p => String(p.id) === String(paqueteId) || String(p.id) === String(paqueteId?.id)
-      )
-      const paqueteIdFinal = paqueteSel?.id ?? (typeof paqueteId === 'object' ? paqueteId.id : paqueteId)
-      const paqueteIdNumerico = paqueteIdFinal != null && paqueteIdFinal !== '' ? Number(paqueteIdFinal) : null
-      const nombreActividad = paqueteSel ? `${paqueteSel.nombre_paquete} - ${nombre}` : nombre
-
-      if (!agendaId) {
-        setError('No se pudo registrar la agenda de la reserva.')
-        return
-      }
-
-      if (!user?.id) {
-        setError('No fue posible identificar al usuario autenticado. Inicia sesión nuevamente.')
-        return
-      }
-
-      if (paqueteIdNumerico == null || Number.isNaN(paqueteIdNumerico)) {
-        setError('Selecciona un paquete válido para continuar con la reserva.')
-        return
-      }
-
-      const { data: actividadCreada, error: actividadError } = await supabase
-        .from('actividad')
-        .insert([
-          {
-            idusuario: user.id,
-            idagenda: agendaId,
-            idpaquete: paqueteIdNumerico,
-            idestado_pago: 1,
-            nombre_actividad: nombreActividad,
-            ubicacion
-          }
-        ])
-        .select()
-
-      if (actividadError?.status === 409) {
-        console.error('Error de conflicto al crear actividad:', actividadError.message)
-      }
-
-      const actividadGenerada = actividadCreada?.[0] ?? null
-
-      if (actividadError || !actividadGenerada?.id) {
-        setError('No fue posible crear la actividad de la reserva.')
-        return
-      }
-
-      const { mapa: mapaActualizado, error: calendarioActualizadoError } = await fetchCalendarAvailability()
-      if (calendarioActualizadoError) {
-        console.error('No se pudo actualizar la disponibilidad del calendario', calendarioActualizadoError)
-      } else {
-        setCalendarAvailability(mapaActualizado)
-      }
-
-      setMensaje('Reserva creada correctamente.')
-      setForm({ ...initialForm, nombre, telefono, correo })
-      setSelectedDate(null)
-    } finally {
-      setEnviando(false)
+      usuarioId = nuevoUsuario.id
     }
+
+    /** CREAR AGENDA */
+    const { data: nuevaAgenda, error: agendaError } = await supabase
+      .from('agenda')
+      .insert([
+        {
+          fecha: form.fecha,
+          horainicio: horaInicioSQL,
+          horafin: horaFinSQL,
+          disponible: false,
+          idfotografo: fotografoIdNumerico
+        }
+      ])
+      .select('id')
+      .single()
+
+    if (agendaError) {
+      setError('No fue posible crear la agenda.')
+      return
+    }
+
+    const agendaId = nuevaAgenda.id
+
+    /** CREAR ACTIVIDAD */
+    const { data: actividadCreada, error: actividadError } = await supabase
+      .from('actividad')
+      .insert([
+        {
+          idusuario: usuarioId,
+          idagenda: agendaId,
+          idpaquete: paqueteIdNumerico,
+          nombre_actividad: form.nombre,
+          ubicacion: form.ubicacion,
+          idestado_actividad: 1,
+          idestado_pago: 1
+        }
+      ])
+      .select()
+      .single()
+
+    if (actividadError) {
+      setError('No se pudo crear la actividad.')
+      return
+    }
+
+    /** BUSCAR PRECIO DEL PAQUETE */
+    const paqueteSeleccionado = paquetes.find(
+      p => p.id === paqueteIdNumerico
+    )
+
+    /** REGISTRAR PAGO */
+    await supabase
+      .from('pago')
+      .insert([
+        {
+          idactividad: actividadCreada.id,
+          metodo_pago: form.formaPago,
+          monto: paqueteSeleccionado?.precio || 0,
+          tipo_pago: 'Anticipo',
+          idestado_pago: 1
+        }
+      ])
+
+    setMensaje('Reserva creada correctamente 📸')
+
+    /** LIMPIAR FORMULARIO */
+    setForm(initialForm)
+
+  } catch (err) {
+    console.error(err)
+    setError('Ocurrió un error inesperado.')
+  } finally {
+    setEnviando(false)
   }
+}
+
+
+/************************************************************************************************* */
 
   /** Mensaje dinámico */
+
+  
   const selectedDateKey = useMemo(
     () => (selectedDate ? dayjs(selectedDate).format('YYYY-MM-DD') : ''),
     [selectedDate]
@@ -923,24 +894,24 @@ export default function Booking() {
           </p>
         </div>
 
-        {!user && (
+        {/**!user && (
           <div className="rounded-3xl border border-amber-300 bg-amber-50/80 px-6 py-4 text-sm text-amber-900">
             Debes iniciar sesión o registrarte para completar una reserva.
           </div>
-        )}
+        )*/}
 
         <form onSubmit={handleSubmit} className="card max-w-3xl">
           <div className="card-body grid gap-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <input placeholder="Nombre" value={form.nombre} onChange={e => updateField('nombre', e.target.value)} className={inputClass} disabled={!user || enviando} />
-              <input placeholder="Teléfono" value={form.telefono} onChange={e => updateField('telefono', e.target.value)} className={inputClass} disabled={!user || enviando} />
+              <input placeholder="Nombre" value={form.nombre} onChange={e => updateField('nombre', e.target.value)} className={inputClass} disabled={enviando}/>
+              <input placeholder="Teléfono" value={form.telefono} onChange={e => updateField('telefono', e.target.value)} className={inputClass} disabled={enviando} />
             </div>
-            <input placeholder="Correo electrónico" value={form.correo} onChange={e => updateField('correo', e.target.value)} className={inputClass} disabled={!user || enviando} />
+            <input placeholder="Correo electrónico" value={form.correo} onChange={e => updateField('correo', e.target.value)} className={inputClass} disabled={enviando} />
             <select
               value={form.paqueteId}
               onChange={e => updateField('paqueteId', e.target.value)}
               className={inputClass}
-              disabled={!user || enviando}
+              disabled={enviando}
             >
               <option value="">Selecciona un paquete</option>
               {paquetes.map(p => {
@@ -972,7 +943,7 @@ export default function Booking() {
                   dayClassName={getDayClassName}
                   calendarClassName="booking-datepicker"
                   popperClassName="booking-datepicker-popper"
-                  disabled={!user || enviando || !hayFotografos}
+                  disabled={enviando || !hayFotografos}
                   isClearable
                   showPopperArrow={false}
                 />
@@ -1026,7 +997,7 @@ export default function Booking() {
                   value={form.horaInicio}
                   options={startOptions}
                   onChange={valor => updateField('horaInicio', valor)}
-                  disabled={!user || enviando || !startOptions.length}
+                  disabled={enviando || !startOptions.length}
                   placeholder={!selectedDate ? 'Selecciona un día para ver horarios' : 'No hay horas disponibles'}
                 />
                 <TimeWheelPicker
@@ -1035,7 +1006,7 @@ export default function Booking() {
                   value={form.horaFin}
                   options={endOptions}
                   onChange={valor => updateField('horaFin', valor)}
-                  disabled={!user || enviando || !endOptions.length}
+                  disabled={enviando || !endOptions.length}
                   placeholder={
                     !form.horaInicio
                       ? 'Selecciona una hora de inicio'
@@ -1056,14 +1027,14 @@ export default function Booking() {
               value={form.ubicacion}
               onChange={e => updateField('ubicacion', e.target.value)}
               className={inputClass}
-              disabled={!user || enviando}
+              disabled={enviando}
             />
 
             <select
               value={form.formaPago}
               onChange={e => updateField('formaPago', e.target.value)}
               className={inputClass}
-              disabled={!user || enviando}
+              disabled={enviando}
             >
               <option value="">Selecciona la forma de pago</option>
               {PAYMENT_METHODS.map((metodo) => (
@@ -1100,7 +1071,7 @@ export default function Booking() {
             <div className="flex flex-wrap items-center gap-3">
               <button
                 className="btn btn-primary"
-                disabled={!user || enviando}
+                disabled={enviando}
               >
                 {enviando ? 'Enviando…' : 'Enviar solicitud'}
               </button>

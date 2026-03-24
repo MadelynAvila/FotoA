@@ -37,7 +37,7 @@ export default function App(){
           <Route path="/resenas" element={<Reviews />} />
           <Route path="/reservar" element={<Booking />} />
           <Route path="/login" element={<Login />} />
-          <Route path="/registrarse" element={<Register />} />
+          
           <Route element={<ProtectedRoute />}>
             <Route path="/mi-cuenta" element={<MiCuenta />} />
           </Route>

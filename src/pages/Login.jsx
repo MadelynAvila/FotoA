@@ -82,12 +82,7 @@ export default function Login() {
             Puedes usar tu <b>nombre de usuario</b> o tu <b>correo electrónico</b>.
           </p>
 
-          <div className="text-center text-sm text-umber">
-            ¿Aún no tienes cuenta?{' '}
-            <Link to="/registrarse" className="font-semibold text-amber-600 hover:text-amber-500">
-              Registrarse
-            </Link>
-          </div>
+          
         </form>
       </div>
     </div>
