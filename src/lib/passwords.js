@@ -5,6 +5,7 @@ const LOCAL_HASH_ITERATIONS = 310_000
 const LOCAL_HASH_KEY_LENGTH = 32
 const LOCAL_SALT_LENGTH = 16
 const textEncoder = new TextEncoder()
+const TEMP_PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%*'
 
 const getCrypto = () => {
   const crypto = globalThis.crypto ?? null
@@ -85,4 +86,17 @@ export const hashPasswordWithDatabase = async (password) => {
     console.error('[passwords] Error generando hash local de contraseña:', err)
     throw new Error('No se pudo proteger la contraseña.')
   }
+}
+
+export const generateTemporaryPassword = (length = 12) => {
+  const safeLength = Number.isFinite(length) ? Math.max(10, Math.trunc(length)) : 12
+  const crypto = getCrypto()
+  const values = new Uint32Array(safeLength)
+  crypto.getRandomValues(values)
+  let password = ''
+  for (let index = 0; index < safeLength; index += 1) {
+    const charIndex = values[index] % TEMP_PASSWORD_CHARS.length
+    password += TEMP_PASSWORD_CHARS[charIndex]
+  }
+  return password
 }

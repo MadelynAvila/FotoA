@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient'
+import { generateTemporaryPassword, hashPasswordWithDatabase } from './passwords'
 
 const AGENDA_DEFAULT_START = '08:00'
 const AGENDA_DEFAULT_END = '17:00'
@@ -155,6 +156,113 @@ async function resolveEstadoActividad(nombre){
   return match?.id ?? null
 }
 
+function normalizeText(value){
+  return (value || '').toString().trim().toLowerCase()
+}
+
+async function sendCredentialsEmail({ correo, username, temporaryPassword, reservaId }){
+  if (!correo || !temporaryPassword) {
+    return { sent: false, reason: 'missing-data' }
+  }
+
+  const payload = {
+    to: correo,
+    username,
+    temporaryPassword,
+    reservaId,
+    subject: 'Tus credenciales de acceso - FotoA',
+    message: `Tu reserva #${reservaId} fue aprobada. Usuario: ${username || correo}. Contraseña temporal: ${temporaryPassword}`
+  }
+
+  const edgeFunctions = ['send-booking-credentials', 'send-credentials-email']
+  for (const functionName of edgeFunctions) {
+    try {
+      const { error } = await supabase.functions.invoke(functionName, { body: payload })
+      if (!error) {
+        return { sent: true, functionName }
+      }
+      console.warn(`[apiRouter] Falló función de correo ${functionName}:`, error)
+    } catch (err) {
+      console.warn(`[apiRouter] No se pudo invocar la función ${functionName}:`, err)
+    }
+  }
+
+  return { sent: false, reason: 'function-not-available' }
+}
+
+async function ensureUserCredentialsOnApproval({ reservaId, previousEstadoId = null, newEstadoId }){
+  if (!newEstadoId) {
+    return { generated: false, mailed: false }
+  }
+
+  const { data: estados = [], error: estadosError } = await supabase
+    .from('estado_actividad')
+    .select('id, nombre_estado')
+    .in('id', [newEstadoId, previousEstadoId].filter(Boolean))
+
+  if (estadosError) {
+    console.warn('[apiRouter] No se pudieron resolver estados de actividad:', estadosError)
+    return { generated: false, mailed: false }
+  }
+
+  const estadoNuevo = estados.find(estado => Number(estado.id) === Number(newEstadoId))
+  if (normalizeText(estadoNuevo?.nombre_estado) !== 'reservada') {
+    return { generated: false, mailed: false }
+  }
+
+  const estadoAnterior = estados.find(estado => Number(estado.id) === Number(previousEstadoId))
+  if (normalizeText(estadoAnterior?.nombre_estado) === 'reservada') {
+    return { generated: false, mailed: false }
+  }
+
+  const { data: actividad, error: actividadError } = await supabase
+    .from('actividad')
+    .select('id, idusuario, usuario:usuario(id, username, correo, contrasena_hash, idestado)')
+    .eq('id', reservaId)
+    .maybeSingle()
+
+  if (actividadError || !actividad?.usuario) {
+    console.warn('[apiRouter] No se pudo obtener usuario asociado a la reserva aprobada:', actividadError)
+    return { generated: false, mailed: false }
+  }
+
+  const usuario = Array.isArray(actividad.usuario) ? actividad.usuario[0] : actividad.usuario
+  const correo = usuario?.correo ? String(usuario.correo).trim() : ''
+  const currentHash = String(usuario?.contrasena_hash ?? '').trim()
+  if (currentHash) {
+    return { generated: false, mailed: false, userAlreadyReady: true }
+  }
+
+  const temporaryPassword = generateTemporaryPassword(12)
+  const passwordHash = await hashPasswordWithDatabase(temporaryPassword)
+  const { error: userUpdateError } = await supabase
+    .from('usuario')
+    .update({
+      contrasena_hash: passwordHash,
+      idestado: usuario?.idestado ?? 1
+    })
+    .eq('id', usuario.id)
+
+  if (userUpdateError) {
+    console.error('[apiRouter] No se pudo guardar la contraseña generada:', userUpdateError)
+    return { generated: false, mailed: false }
+  }
+
+  const emailResult = await sendCredentialsEmail({
+    correo,
+    username: usuario.username || correo,
+    temporaryPassword,
+    reservaId
+  })
+
+  return {
+    generated: true,
+    mailed: Boolean(emailResult.sent),
+    correo,
+    temporaryPassword: emailResult.sent ? null : temporaryPassword
+  }
+}
+
 async function handleReservaPatch(reservaId, body){
   if (!body || typeof body !== 'object'){
     return jsonResponse({ success: false, message: 'Solicitud inválida.' }, 400)
@@ -268,7 +376,26 @@ async function handleReservaPatch(reservaId, body){
     return jsonResponse({ success: false, message: detalleError?.message || 'No se pudo obtener la reserva actualizada.' }, 500)
   }
 
-  return jsonResponse({ success: true, item: reservaActualizada, message: '✅ Reserva actualizada' })
+  const approvalSync = await ensureUserCredentialsOnApproval({
+    reservaId,
+    previousEstadoId: actividad.idestado_actividad ?? null,
+    newEstadoId: estadoId
+  })
+
+  const statusMessage = approvalSync.generated
+    ? approvalSync.mailed
+      ? '✅ Reserva aprobada. Se generaron credenciales y se enviaron al cliente.'
+      : '✅ Reserva aprobada. Se generaron credenciales (envío por correo pendiente).'
+    : '✅ Reserva actualizada'
+
+  return jsonResponse({
+    success: true,
+    item: reservaActualizada,
+    credentials: approvalSync.generated
+      ? { mailed: approvalSync.mailed, correo: approvalSync.correo }
+      : null,
+    message: statusMessage
+  })
 }
 
 async function handleReservaBulk(body){
@@ -288,6 +415,15 @@ async function handleReservaBulk(body){
     return jsonResponse({ success: false, message: 'El estado indicado no existe.' }, 400)
   }
 
+  const { data: actuales = [], error: actualesError } = await supabase
+    .from('actividad')
+    .select('id, idestado_actividad')
+    .in('id', reservas)
+
+  if (actualesError) {
+    return jsonResponse({ success: false, message: actualesError.message || 'No se pudo validar el estado previo de las reservas.' }, 500)
+  }
+
   const { data, error } = await supabase
     .from('actividad')
     .update({ idestado_actividad: estadoId })
@@ -298,7 +434,30 @@ async function handleReservaBulk(body){
     return jsonResponse({ success: false, message: error.message || 'No se pudieron actualizar las reservas.' }, 500)
   }
 
-  return jsonResponse({ success: true, updated: data?.length ?? 0, estadoId, message: `✅ Estado actualizado para ${data?.length ?? 0} reservas.` })
+  const previousStateMap = new Map((actuales ?? []).map(item => [Number(item.id), item.idestado_actividad ?? null]))
+  const updatedIds = (data ?? []).map(item => Number(item.id)).filter(Boolean)
+  let generatedCount = 0
+  let mailedCount = 0
+
+  for (const reservaId of updatedIds) {
+    const result = await ensureUserCredentialsOnApproval({
+      reservaId,
+      previousEstadoId: previousStateMap.get(reservaId) ?? null,
+      newEstadoId: estadoId
+    })
+    if (result.generated) {
+      generatedCount += 1
+      if (result.mailed) mailedCount += 1
+    }
+  }
+
+  return jsonResponse({
+    success: true,
+    updated: data?.length ?? 0,
+    estadoId,
+    credentials: { generated: generatedCount, mailed: mailedCount },
+    message: `✅ Estado actualizado para ${data?.length ?? 0} reservas.`
+  })
 }
 
 async function handleMisReservas(query){
