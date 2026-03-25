@@ -687,18 +687,25 @@ export default function AdminReservations() {
       setUpdatingId(reserva.id)
       setFeedback({ type: '', message: '' })
 
-      const payload = { idestado_actividad: nuevoEstadoId }
-      if (reservadaEstadoId && nuevoEstadoId === Number(reservadaEstadoId)) {
-        payload.idestado_pago = paymentStateIds.anticipo
+      const payload = {
+        fecha: reserva.fecha ? String(reserva.fecha).slice(0, 10) : new Date().toISOString().slice(0, 10),
+        hora: reserva.horaInicio ? String(reserva.horaInicio).slice(0, 5) : '08:00',
+        idfotografo: reserva.fotografoId || null,
+        estado:
+          safeEstados.find(item => Number(item.id) === nuevoEstadoId)?.nombre_estado || ''
       }
+      const response = await fetch(`/api/reservas/${reserva.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      const result = await response.json().catch(() => null)
 
-      const { error } = await supabase.from('actividad').update(payload).eq('id', reserva.id)
-
-      if (error) {
-        console.error('Error actualizando estado', error)
+      if (!response.ok || !result?.success) {
+        console.error('Error actualizando estado', result)
         setFeedback({
           type: 'error',
-          message: 'No se pudo actualizar el estado. Intenta de nuevo.'
+          message: result?.message || 'No se pudo actualizar el estado. Intenta de nuevo.'
         })
       } else {
         const estadoActualizado = safeEstados.find(item => Number(item.id) === nuevoEstadoId)
@@ -722,7 +729,10 @@ export default function AdminReservations() {
               : item
           )
         )
-        setFeedback({ type: 'success', message: 'Estado actualizado correctamente.' })
+        setFeedback({
+          type: 'success',
+          message: result?.message || 'Estado actualizado correctamente.'
+        })
       }
 
       setUpdatingId(null)
@@ -1213,4 +1223,3 @@ export default function AdminReservations() {
     </div>
   )
 }
-
